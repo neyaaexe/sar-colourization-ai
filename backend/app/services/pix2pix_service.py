@@ -1,11 +1,11 @@
+
 import os
 import sys
 
-from huggingface_hub import hf_hub_download
-
 import torch
-from PIL import Image
 import numpy as np
+from PIL import Image, ImageFilter
+from huggingface_hub import hf_hub_download
 
 
 # ============================================================
@@ -22,8 +22,6 @@ SAR2OPTICAL_DIR = os.path.abspath(
 if SAR2OPTICAL_DIR not in sys.path:
     sys.path.insert(0, SAR2OPTICAL_DIR)
 
-
-# Import the Pix2Pix implementation
 from src.pix2pix import Pix2Pix
 
 
@@ -32,29 +30,15 @@ from src.pix2pix import Pix2Pix
 # ============================================================
 
 class Pix2PixService:
-    """
-    Pix2Pix SAR-to-optical image translation service.
-
-    Uses the pretrained Pix2Pix generator from
-    the SAR2Optical project.
-    """
 
     def __init__(self):
 
-        # ----------------------------------------------------
         # Select GPU if available
-        # ----------------------------------------------------
-
         self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # ----------------------------------------------------
-        # Path to pretrained checkpoint
-        # ----------------------------------------------------
-
+        # Local checkpoint path
         self.checkpoint_path = os.path.abspath(
             os.path.join(
                 os.path.dirname(__file__),
@@ -62,16 +46,21 @@ class Pix2PixService:
             )
         )
 
+        # Download checkpoint if it is not available locally
         if not os.path.exists(self.checkpoint_path):
-            raise FileNotFoundError(
-                "Pix2Pix checkpoint not found: "
-                f"{self.checkpoint_path}"
+
+            print(
+                "[Pix2Pix] Local checkpoint not found. "
+                "Downloading from Hugging Face..."
             )
 
-        # ----------------------------------------------------
-        # Create Pix2Pix model
-        # ----------------------------------------------------
+            self.checkpoint_path = hf_hub_download(
+                repo_id="Neyaathegreat/sar-pix2pix",
+                filename="pix2pix_gen_180.pth",
+                repo_type="model"
+            )
 
+        # Create model
         self.model = Pix2Pix(
             c_in=3,
             c_out=3,
@@ -80,10 +69,7 @@ class Pix2PixService:
 
         self.model.to(self.device)
 
-        # ----------------------------------------------------
-        # Load pretrained generator
-        # ----------------------------------------------------
-
+        # Load trained generator
         self.model.load_model(
             self.checkpoint_path,
             device=self.device
@@ -92,8 +78,7 @@ class Pix2PixService:
         self.model.eval()
 
         print(
-            f"[Pix2Pix] Model loaded successfully "
-            f"on {self.device}"
+            f"[Pix2Pix] Model loaded successfully on {self.device}"
         )
 
     # ========================================================
@@ -106,141 +91,88 @@ class Pix2PixService:
         output_image_path: str
     ) -> str:
 
-        # ----------------------------------------------------
-        # Validate input image
-        # ----------------------------------------------------
-
         if not os.path.exists(sar_image_path):
             raise FileNotFoundError(
                 f"SAR image not found: {sar_image_path}"
             )
 
-        # ----------------------------------------------------
-        # Create output directory
-        # ----------------------------------------------------
-
-        output_directory = os.path.dirname(
-            output_image_path
-        )
+        # Create output directory if necessary
+        output_directory = os.path.dirname(output_image_path)
 
         if output_directory:
-            os.makedirs(
-                output_directory,
-                exist_ok=True
-            )
+            os.makedirs(output_directory, exist_ok=True)
 
-        # ----------------------------------------------------
-        # Load SAR image
-        # ----------------------------------------------------
+        # Load input image
+        image = Image.open(sar_image_path).convert("RGB")
 
-        image = Image.open(
-            sar_image_path
-        ).convert("RGB")
-
-        # ----------------------------------------------------
-        # Resize to Pix2Pix input size
-        # ----------------------------------------------------
-
+        # Resize to the model's required input size
         image = image.resize(
-            (256, 256)
+            (256, 256),
+            Image.Resampling.LANCZOS
         )
 
-        # ----------------------------------------------------
-        # Convert PIL → NumPy
-        # ----------------------------------------------------
-
+        # Convert PIL image to NumPy
+        # Values remain in the [0, 255] range
         image_array = np.asarray(
             image,
             dtype=np.float32
         )
 
-        # ----------------------------------------------------
-        # HWC → CHW
-        # ----------------------------------------------------
-
+        # HWC -> CHW -> BCHW
         image_tensor = torch.from_numpy(
             image_array
-        ).permute(
-            2,
-            0,
-            1
-        )
+        ).permute(2, 0, 1).unsqueeze(0)
 
-        # ----------------------------------------------------
-        # Add batch dimension
-        # ----------------------------------------------------
+        # Move tensor to CPU or GPU
+        image_tensor = image_tensor.to(self.device)
 
-        image_tensor = image_tensor.unsqueeze(0)
-
-        # ----------------------------------------------------
-        # Normalize [0,255] → [-1,1]
-        # ----------------------------------------------------
-
-        image_tensor = image_tensor / 255.0
-
-        image_tensor = (
-            image_tensor - 0.5
-        ) / 0.5
-
-        # ----------------------------------------------------
-        # Move tensor to GPU/CPU
-        # ----------------------------------------------------
-
-        image_tensor = image_tensor.to(
-            self.device
-        )
-
-        # ----------------------------------------------------
-        # Generate optical-like RGB image
-        # ----------------------------------------------------
-
+        # Generate the colorized image
+        # The model normalizes raw [0, 255] input internally
         with torch.no_grad():
-
             generated = self.model.generate(
                 image_tensor,
-                is_scaled=True,
+                is_scaled=False,
                 to_uint8=True
             )
 
-        # ----------------------------------------------------
-        # Tensor → NumPy
-        # ----------------------------------------------------
-
+        # BCHW -> HWC
         generated = generated.squeeze(0)
-
-        generated = generated.permute(
-            1,
-            2,
-            0
-        )
-
+        generated = generated.permute(1, 2, 0)
         generated = generated.cpu().numpy()
 
-        # ----------------------------------------------------
-        # Ensure valid RGB range
-        # ----------------------------------------------------
-
+        # Ensure valid RGB pixel values
         generated = np.clip(
             generated,
             0,
             255
-        ).astype(
-            np.uint8
-        )
+        ).astype(np.uint8)
+
+        # Convert generated pixels to a PIL image
+        output = Image.fromarray(generated, mode="RGB")
 
         # ----------------------------------------------------
-        # Save output
+        # SHARPEN OUTPUT
         # ----------------------------------------------------
-
-        output = Image.fromarray(
-            generated,
-            mode="RGB"
+        # Enhances edges and makes existing details more visible.
+        # This does not recover details that the model never generated.
+        output = output.filter(
+            ImageFilter.UnsharpMask(
+                radius=1.2,
+                percent=130,
+                threshold=3
+            )
         )
 
+        # Save as high-quality JPEG
         output.save(
             output_image_path,
             format="JPEG",
-            quality=95
+            quality=95,
+            subsampling=0
+        )
+
+        print(
+            f"[Pix2Pix] Colorized image saved to: {output_image_path}"
         )
 
         return output_image_path

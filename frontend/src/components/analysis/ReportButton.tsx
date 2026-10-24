@@ -7,14 +7,45 @@ interface ReportButtonProps {
   conversation: ConversationSession;
 }
 
-const getImageUrl = (path?: string) => {
+interface LandCoverAnalysisData {
+  model?: string;
+  method?: string;
+  percentages?: Record<string, number>;
+  warning?: string;
+  segmentation_map_url?: string;
+}
+
+interface ReportImageAnalysis {
+  image_width?: number;
+  image_height?: number;
+  dimensions?: string;
+  format?: string;
+  file_format?: string;
+  channels?: number | string;
+  brightness?: number;
+  mean_brightness?: number;
+  contrast?: number;
+  dominant_channel?: string;
+  mean_red?: number;
+  mean_green?: number;
+  mean_blue?: number;
+  land_cover_analysis?: LandCoverAnalysisData;
+}
+
+const API_BASE = 'http://127.0.0.1:8000';
+
+const getImageUrl = (path?: string): string => {
   if (!path) return '';
 
-  if (path.startsWith('http://') || path.startsWith('https://')) {
+  if (/^https?:\/\//i.test(path)) {
     return path;
   }
 
-  return `${window.location.origin}${path}`;
+  if (path.startsWith('/')) {
+    return `${API_BASE}${path}`;
+  }
+
+  return `${API_BASE}/${path}`;
 };
 
 const loadImageAsDataUrl = async (
@@ -42,14 +73,12 @@ const loadImageAsDataUrl = async (
         }
       };
 
-      reader.onerror = () => {
-        reject(new Error('Could not read image'));
-      };
+      reader.onerror = () => reject(new Error('Could not read image'));
 
       reader.readAsDataURL(blob);
     });
   } catch (error) {
-    console.error('Failed to load report image:', error);
+    console.error('Failed to load report image:', path, error);
     return null;
   }
 };
@@ -58,7 +87,7 @@ const addSectionTitle = (
   doc: jsPDF,
   title: string,
   y: number
-) => {
+): number => {
   doc.setFillColor(232, 242, 235);
   doc.roundedRect(14, y - 6, 182, 10, 2, 2, 'F');
 
@@ -76,7 +105,7 @@ const addLabelValue = (
   value: string,
   x: number,
   y: number
-) => {
+): void => {
   doc.setTextColor(105, 123, 114);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
@@ -85,7 +114,33 @@ const addLabelValue = (
   doc.setTextColor(18, 61, 45);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
-  doc.text(value, x, y + 5);
+
+  const lines = doc.splitTextToSize(value || 'Unavailable', 55);
+  doc.text(lines, x, y + 5);
+};
+
+const addParagraph = (
+  doc: jsPDF,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth = 174
+): number => {
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(75, 91, 82);
+
+  const lines = doc.splitTextToSize(text, maxWidth);
+  doc.text(lines, x, y);
+
+  return y + lines.length * 4.5;
+};
+
+const getImageFormat = (dataUrl: string): 'PNG' | 'JPEG' => {
+  return dataUrl.startsWith('data:image/jpeg') ||
+    dataUrl.startsWith('data:image/jpg')
+    ? 'JPEG'
+    : 'PNG';
 };
 
 export const ReportButton: React.FC<ReportButtonProps> = ({
@@ -94,7 +149,7 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
   const [generating, setGenerating] = React.useState(false);
 
   const generateReport = async () => {
-    if (!conversation) return;
+    if (!conversation || generating) return;
 
     setGenerating(true);
 
@@ -123,10 +178,7 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
             new Date(a.created_at).getTime()
         )[0];
 
-      const [
-        sarDataUrl,
-        pix2pixDataUrl,
-      ] = await Promise.all([
+      const [sarDataUrl, pix2pixDataUrl] = await Promise.all([
         loadImageAsDataUrl(sarImage?.file_path),
         loadImageAsDataUrl(pix2pixImage?.file_path),
       ]);
@@ -135,68 +187,57 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
         orientation: 'portrait',
         unit: 'mm',
         format: 'a4',
+        compress: true,
       });
 
       const pageWidth = 210;
       const pageHeight = 297;
+      const left = 14;
+      const right = 196;
+      const bottomMargin = 20;
 
       let y = 18;
 
-      /*
-       * ------------------------------------------------
-       * HEADER
-       * ------------------------------------------------
-       */
+      // Start a new page whenever the next block will not fit.
+      const ensureSpace = (requiredHeight: number) => {
+        if (y + requiredHeight > pageHeight - bottomMargin) {
+          doc.addPage();
+          y = 20;
+        }
+      };
 
+      // HEADER
       doc.setFillColor(11, 51, 37);
-      doc.roundedRect(
-        12,
-        12,
-        pageWidth - 24,
-        30,
-        4,
-        4,
-        'F'
-      );
+      doc.roundedRect(12, 12, pageWidth - 24, 30, 4, 4, 'F');
 
       doc.setTextColor(255, 255, 255);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(20);
-      doc.text(
-        'SAR Analysis Report',
-        20,
-        25
-      );
+      doc.text('SAR Analysis Report', 20, 25);
 
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.setTextColor(205, 228, 215);
-
       doc.text(
-        'SAR Colourization using AI · Earth Observation',
+        'SAR Colourization using AI | Earth Observation',
         20,
         33
       );
 
       y = 52;
 
-      /*
-       * ------------------------------------------------
-       * SCENE INFORMATION
-       * ------------------------------------------------
-       */
-
+      // SCENE INFORMATION
       doc.setTextColor(18, 61, 45);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
 
-      doc.text(
+      const sceneTitle = doc.splitTextToSize(
         conversation.title || 'SAR Analysis',
-        14,
-        y
+        180
       );
 
-      y += 8;
+      doc.text(sceneTitle, left, y);
+      y += sceneTitle.length * 6 + 3;
 
       doc.setTextColor(105, 123, 114);
       doc.setFont('helvetica', 'normal');
@@ -206,154 +247,89 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
         analysis.created_at
       ).toLocaleString();
 
-      doc.text(
-        `Generated: ${analysisDate}`,
-        14,
-        y
-      );
-
+      doc.text(`Generated: ${analysisDate}`, left, y);
       y += 12;
 
-      /*
-       * ------------------------------------------------
-       * IMAGE RESULTS
-       * ------------------------------------------------
-       */
-
-      y = addSectionTitle(
-        doc,
-        '1. IMAGE RESULTS',
-        y
-      );
+      // IMAGE RESULTS
+      y = addSectionTitle(doc, '1. IMAGE RESULTS', y);
 
       const imageWidth = 82;
       const imageHeight = 65;
+      const imageY = y + 4;
 
       if (sarDataUrl) {
-        doc.setTextColor(18, 61, 45);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9);
-        doc.text(
-          'Original SAR',
-          14,
-          y
-        );
+        doc.setTextColor(18, 61, 45);
+        doc.text('Original SAR', 14, y);
 
         doc.addImage(
           sarDataUrl,
-          'PNG',
+          getImageFormat(sarDataUrl),
           14,
-          y + 4,
+          imageY,
           imageWidth,
-          imageHeight
+          imageHeight,
+          undefined,
+          'FAST'
         );
+      } else {
+        addParagraph(doc, 'Original SAR image could not be loaded.', 14, y + 5, 82);
       }
 
       if (pix2pixDataUrl) {
-        doc.setTextColor(18, 61, 45);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(9);
-        doc.text(
-          'Pix2Pix Optical Result',
-          108,
-          y
-        );
+        doc.setTextColor(18, 61, 45);
+        doc.text('Optical Result', 108, y);
 
         doc.addImage(
           pix2pixDataUrl,
-          'PNG',
+          getImageFormat(pix2pixDataUrl),
           108,
-          y + 4,
+          imageY,
           imageWidth,
-          imageHeight
+          imageHeight,
+          undefined,
+          'FAST'
         );
+      } else {
+        addParagraph(doc, 'Optical result image could not be loaded.', 108, y + 5, 82);
       }
 
       y += imageHeight + 15;
 
-      /*
-       * ------------------------------------------------
-       * TERRAIN ANALYSIS
-       * ------------------------------------------------
-       */
+      // TERRAIN ANALYSIS
+      ensureSpace(55);
+      y = addSectionTitle(doc, '2. TERRAIN ANALYSIS', y);
 
-      y = addSectionTitle(
-        doc,
-        '2. TERRAIN ANALYSIS',
-        y
-      );
-
-      const terrain =
-        analysis.terrain_analysis || {};
+      const terrain = analysis.terrain_analysis || {};
 
       const predictedTerrain =
-        terrain.predicted_terrain ||
-        terrain.predicted_terrain||
-        'Unknown';
+        terrain.predicted_terrain || 'Unknown';
 
       const confidence =
         typeof terrain.confidence === 'number'
           ? `${terrain.confidence.toFixed(2)}%`
           : 'Unavailable';
 
-      const terrainModel =
-        terrain.model ||
-        'EuroSAT-Swin';
+      const terrainModel = terrain.model || 'EuroSAT-Swin';
+      const device = terrain.device || 'Unknown';
 
-      const device =
-        terrain.device ||
-        'GPU';
-
-      addLabelValue(
-        doc,
-        'Predicted terrain',
-        String(predictedTerrain),
-        18,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Confidence',
-        confidence,
-        78,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Model',
-        String(terrainModel),
-        130,
-        y
-      );
+      addLabelValue(doc, 'Predicted terrain', String(predictedTerrain), 18, y);
+      addLabelValue(doc, 'Confidence', confidence, 78, y);
+      addLabelValue(doc, 'Model', String(terrainModel), 138, y);
 
       y += 18;
 
-      addLabelValue(
-        doc,
-        'Processing device',
-        String(device),
-        18,
-        y
-      );
+      addLabelValue(doc, 'Processing device', String(device), 18, y);
+      y += 18;
 
-      y += 15;
+      // IMAGE STATISTICS
+      ensureSpace(90);
+      y = addSectionTitle(doc, '3. IMAGE STATISTICS', y);
 
-      /*
-       * ------------------------------------------------
-       * IMAGE STATISTICS
-       * ------------------------------------------------
-       */
-
-      y = addSectionTitle(
-        doc,
-        '3. IMAGE STATISTICS',
-        y
-      );
-
-      const stats =
-        analysis.image_analysis || {};
+      const stats = (analysis.image_analysis || {}) as ReportImageAnalysis;
 
       const dimensions =
         stats.image_width !== undefined &&
@@ -361,10 +337,7 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
           ? `${stats.image_width} × ${stats.image_height}`
           : stats.dimensions || 'Unknown';
 
-      const format =
-        stats.format ||
-        stats.file_format ||
-        'Unknown';
+      const format = stats.format || stats.file_format || 'Unknown';
 
       const channels =
         stats.channels !== undefined
@@ -383,242 +356,301 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
           ? stats.contrast.toFixed(2)
           : 'Unavailable';
 
-      const dominantChannel =
-        stats.dominant_channel ||
-        'Unknown';
+      const dominantChannel = stats.dominant_channel || 'Unknown';
 
       const meanRed =
         typeof stats.mean_red === 'number'
           ? stats.mean_red.toFixed(2)
-          : '—';
+          : 'Unavailable';
 
       const meanGreen =
         typeof stats.mean_green === 'number'
           ? stats.mean_green.toFixed(2)
-          : '—';
+          : 'Unavailable';
 
       const meanBlue =
         typeof stats.mean_blue === 'number'
           ? stats.mean_blue.toFixed(2)
-          : '—';
+          : 'Unavailable';
 
-      addLabelValue(
-        doc,
-        'Dimensions',
-        dimensions,
-        18,
-        y
-      );
+      addLabelValue(doc, 'Dimensions', dimensions, 18, y);
+      addLabelValue(doc, 'Format', format.toUpperCase(), 78, y);
+      addLabelValue(doc, 'Channels', channels, 138, y);
 
-      addLabelValue(
-        doc,
-        'Format',
-        format,
-        78,
-        y
-      );
+      y += 18;
 
-      addLabelValue(
-        doc,
-        'Channels',
-        channels,
-        130,
-        y
-      );
+      addLabelValue(doc, 'Brightness', brightness, 18, y);
+      addLabelValue(doc, 'Contrast', contrast, 78, y);
+      addLabelValue(doc, 'Dominant channel', dominantChannel, 138, y);
 
-      y += 17;
+      y += 18;
 
-      addLabelValue(
-        doc,
-        'Brightness',
-        brightness,
-        18,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Contrast',
-        contrast,
-        78,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Dominant channel',
-        dominantChannel,
-        130,
-        y
-      );
-
-      y += 17;
-
-      addLabelValue(
-        doc,
-        'Mean Red',
-        meanRed,
-        18,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Mean Green',
-        meanGreen,
-        78,
-        y
-      );
-
-      addLabelValue(
-        doc,
-        'Mean Blue',
-        meanBlue,
-        130,
-        y
-      );
+      addLabelValue(doc, 'Mean Red', meanRed, 18, y);
+      addLabelValue(doc, 'Mean Green', meanGreen, 78, y);
+      addLabelValue(doc, 'Mean Blue', meanBlue, 138, y);
 
       y += 20;
 
-      /*
-       * ------------------------------------------------
-       * MODEL INFORMATION
-       * ------------------------------------------------
-       */
+      // LAND COVER ANALYSIS
+      const landCover = stats.land_cover_analysis;
 
-      y = addSectionTitle(
-        doc,
-        '4. MODEL INFORMATION',
-        y
-      );
+      if (landCover?.percentages) {
+        ensureSpace(90);
+        y = addSectionTitle(doc, '4. LAND COVER ANALYSIS', y);
 
-      const modelInfo =
-        analysis.model_information || {};
+        const categories = [
+          { key: 'water', label: 'Water' },
+          { key: 'vegetation', label: 'Vegetation' },
+          { key: 'bare_land', label: 'Bare land' },
+          { key: 'built_up', label: 'Built-up' },
+          { key: 'other', label: 'Other' },
+        ];
+
+        for (const category of categories) {
+          ensureSpace(12);
+
+          const percentage =
+            landCover.percentages[category.key] ?? 0;
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(75, 91, 82);
+          doc.text(category.label, 18, y);
+
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(18, 61, 45);
+          doc.text(`${percentage.toFixed(2)}%`, 190, y, {
+            align: 'right',
+          });
+
+          const barX = 18;
+          const barY = y + 3;
+          const barWidth = 172;
+          const barHeight = 2;
+
+          doc.setFillColor(237, 241, 237);
+          doc.roundedRect(barX, barY, barWidth, barHeight, 1, 1, 'F');
+
+          const colors: Record<string, [number, number, number]> = {
+            water: [57, 136, 199],
+            vegetation: [61, 155, 98],
+            bare_land: [196, 154, 87],
+            built_up: [201, 107, 99],
+            other: [146, 155, 150],
+          };
+
+          const [red, green, blue] = colors[category.key];
+
+          doc.setFillColor(red, green, blue);
+
+          const filledWidth =
+            barWidth * Math.min(100, Math.max(0, percentage)) / 100;
+
+          if (filledWidth > 0) {
+            doc.roundedRect(
+              barX,
+              barY,
+              filledWidth,
+              barHeight,
+              1,
+              1,
+              'F'
+            );
+          }
+
+          y += 12;
+        }
+
+        if (landCover.model) {
+          ensureSpace(12);
+          addLabelValue(
+            doc,
+            'Segmentation model',
+            landCover.model,
+            18,
+            y
+          );
+          y += 15;
+        }
+
+        if (landCover.method) {
+          ensureSpace(12);
+          addLabelValue(
+            doc,
+            'Analysis method',
+            landCover.method,
+            18,
+            y
+          );
+          y += 15;
+        }
+
+        if (landCover.warning) {
+          const warningLines = doc.splitTextToSize(
+            `Model limitation: ${landCover.warning}`,
+            174
+          );
+
+          const warningHeight = warningLines.length * 4.5 + 8;
+          ensureSpace(warningHeight);
+
+          doc.setFillColor(255, 248, 230);
+          doc.setDrawColor(235, 210, 155);
+          doc.roundedRect(
+            14,
+            y - 4,
+            182,
+            warningHeight,
+            2,
+            2,
+            'FD'
+          );
+
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(120, 85, 30);
+          doc.text(warningLines, 18, y + 1);
+
+          y += warningHeight + 4;
+        }
+
+        // SEGMENTATION MAP
+        if (landCover.segmentation_map_url) {
+          const segmentationDataUrl = await loadImageAsDataUrl(
+            landCover.segmentation_map_url
+          );
+
+          if (segmentationDataUrl) {
+            ensureSpace(90);
+
+            y = addSectionTitle(doc, 'SEGMENTATION MAP', y);
+
+            const props = doc.getImageProperties(segmentationDataUrl);
+
+            const maxWidth = 170;
+            const maxHeight = 85;
+            const scale = Math.min(
+              maxWidth / props.width,
+              maxHeight / props.height
+            );
+
+            const renderedWidth = props.width * scale;
+            const renderedHeight = props.height * scale;
+
+            ensureSpace(renderedHeight + 5);
+
+            doc.addImage(
+              segmentationDataUrl,
+              getImageFormat(segmentationDataUrl),
+              20,
+              y,
+              renderedWidth,
+              renderedHeight,
+              undefined,
+              'FAST'
+            );
+
+            y += renderedHeight + 8;
+          } else {
+            ensureSpace(15);
+            y = addParagraph(
+              doc,
+              'The segmentation map could not be loaded for inclusion in this report.',
+              18,
+              y
+            ) + 5;
+          }
+        }
+      } else {
+        ensureSpace(20);
+        y = addSectionTitle(doc, '4. LAND COVER ANALYSIS', y);
+        y = addParagraph(
+          doc,
+          'Land-cover analysis was not available in the analysis data used to generate this report.',
+          18,
+          y
+        ) + 5;
+      }
+
+      // MODEL INFORMATION
+      ensureSpace(65);
+      y = addSectionTitle(doc, '5. MODEL INFORMATION', y);
+
+      const modelInfo = analysis.model_information || {};
 
       const fullName =
-        modelInfo.full_name ||
-        'Pix2Pix Conditional GAN';
+        modelInfo.full_name || 'Pix2Pix Conditional GAN';
 
       const task =
-        modelInfo.task ||
-        'SAR-to-Optical Image Translation';
+        modelInfo.task || 'SAR-to-Optical Image Translation';
 
       const pix2pixVersion =
-        modelInfo.pix2pix_version ||
-        'Pix2Pix Generator (pth)';
+        modelInfo.pix2pix_version || 'Pix2Pix Generator';
 
       const terrainModelInfo =
-        modelInfo.terrain_model ||
-        terrainModel;
+        modelInfo.terrain_model || terrainModel;
 
-      addLabelValue(
-        doc,
-        'Optical translation model',
-        fullName,
-        18,
-        y
-      );
+      addLabelValue(doc, 'Optical translation model', String(fullName), 18, y);
+      y += 16;
 
-      y += 14;
+      addLabelValue(doc, 'Model version', String(pix2pixVersion), 18, y);
+      addLabelValue(doc, 'Terrain model', String(terrainModelInfo), 105, y);
+      y += 16;
 
-      addLabelValue(
-        doc,
-        'Model version',
-        pix2pixVersion,
-        18,
-        y
-      );
+      ensureSpace(20);
 
-      addLabelValue(
-        doc,
-        'Terrain model',
-        String(terrainModelInfo),
-        105,
-        y
-      );
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(105, 123, 114);
+      doc.text('Task', 18, y);
 
-      y += 14;
+      doc.setTextColor(18, 61, 45);
+      doc.setFont('helvetica', 'bold');
 
-      addLabelValue(
-        doc,
-        'Task',
-        task,
-        18,
-        y
-      );
+      const taskLines = doc.splitTextToSize(String(task), 170);
+      doc.text(taskLines, 18, y + 5);
 
-      y += 20;
+      y += taskLines.length * 5 + 15;
 
-      /*
-       * ------------------------------------------------
-       * FOOTER
-       * ------------------------------------------------
-       */
+      // FOOTERS ON ALL PAGES
+      const pageCount = doc.getNumberOfPages();
 
-      doc.setDrawColor(
-        216,
-        226,
-        219
-      );
+      for (let page = 1; page <= pageCount; page++) {
+        doc.setPage(page);
 
-      doc.line(
-        14,
-        pageHeight - 20,
-        pageWidth - 14,
-        pageHeight - 20
-      );
+        doc.setDrawColor(216, 226, 219);
+        doc.line(14, pageHeight - 20, pageWidth - 14, pageHeight - 20);
 
-      doc.setTextColor(
-        113,
-        128,
-        120
-      );
+        doc.setTextColor(113, 128, 120);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
 
-      doc.setFont(
-        'helvetica',
-        'normal'
-      );
+        doc.text(
+          'Generated by SAR Colourization using AI',
+          14,
+          pageHeight - 13
+        );
 
-      doc.setFontSize(8);
+        doc.text(
+          `Page ${page} of ${pageCount}`,
+          pageWidth - 14,
+          pageHeight - 13,
+          { align: 'right' }
+        );
+      }
 
-      doc.text(
-        'Generated by SAR Colourization using AI',
-        14,
-        pageHeight - 13
-      );
+      // DOWNLOAD
+      const safeTitle = (conversation.title || 'SAR-Analysis')
+        .replace(/[^a-z0-9-_]/gi, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
 
-      doc.text(
-        `Scene ID: ${conversation.id}`,
-        pageWidth - 14,
-        pageHeight - 13,
-        {
-          align: 'right',
-        }
-      );
-
-      /*
-       * ------------------------------------------------
-       * DOWNLOAD
-       * ------------------------------------------------
-       */
-
-      const safeTitle =
-        (conversation.title || 'SAR-Analysis')
-          .replace(/[^a-z0-9-_]/gi, '-')
-          .replace(/-+/g, '-');
-
-      doc.save(
-        `${safeTitle}-report.pdf`
-      );
-
+      doc.save(`${safeTitle || 'SAR-Analysis'}-report.pdf`);
     } catch (error) {
-      console.error(
-        'PDF report generation failed:',
-        error
-      );
+      console.error('PDF report generation failed:', error);
 
       alert(
-        'Could not generate the PDF report. Please try again.'
+        'Could not generate the PDF report. Check the browser console for details and try again.'
       );
     } finally {
       setGenerating(false);
@@ -638,15 +670,9 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
         <FileText className="w-4 h-4" />
       )}
 
-      <span>
-        {generating
-          ? 'Generating...'
-          : 'PDF Report'}
-      </span>
+      <span>{generating ? 'Generating...' : 'PDF Report'}</span>
 
-      {!generating && (
-        <Download className="w-3.5 h-3.5" />
-      )}
+      {!generating && <Download className="w-3.5 h-3.5" />}
     </button>
   );
 };

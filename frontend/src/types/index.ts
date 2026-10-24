@@ -75,3 +75,19 @@ export interface ConversationSummary {
   created_at: string;
   updated_at: string;
 }
+
+export interface LandCoverAnalysisData {
+  model: string;
+  method: string;
+  percentages: {
+    water: number;
+    vegetation: number;
+    bare_land: number;
+    built_up: number;
+    other: number;
+  };
+  pixel_counts?: Record<string, number>;
+  total_pixels?: number;
+  warning?: string;
+  segmentation_map_url?: string;
+}
