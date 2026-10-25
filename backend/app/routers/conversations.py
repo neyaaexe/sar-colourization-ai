@@ -15,12 +15,15 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import User, Conversation, Image, Analysis
+from app.models import User, Conversation, Image, Analysis, Message
 from app.schemas import (
     ConversationResponse,
     ConversationSummary,
     ConversationCreate,
+    ConversationRename,
     ImageResponse,
+    ChatRequest,
+    MessageResponse,
 )
 from app.auth import get_current_user
 from app.config import settings
@@ -97,6 +100,50 @@ def get_conversation_by_id(
 
     return conv
 
+@router.patch(
+    "/{conversation_id}",
+    response_model=ConversationResponse,
+)
+def rename_conversation(
+    conversation_id: str,
+    rename_data: ConversationRename,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    title = rename_data.title.strip()
+
+    if not title:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Scene name cannot be empty.",
+        )
+
+    if len(title) > 120:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Scene name cannot exceed 120 characters.",
+        )
+
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation session not found",
+        )
+
+    conversation.title = title
+    db.commit()
+    db.refresh(conversation)
+
+    return conversation
 
 @router.delete(
     "/{conversation_id}",
@@ -389,3 +436,180 @@ def process_sar_image(
         .filter(Conversation.id == conversation_id)
         .first()
     )
+@router.get(
+    "/{conversation_id}/messages",
+    response_model=List[MessageResponse],
+)
+def get_chat_messages(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation session not found",
+        )
+
+    return (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+
+@router.post(
+    "/{conversation_id}/chat",
+    response_model=MessageResponse,
+)
+def send_chat_message(
+    conversation_id: str,
+    chat_request: ChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    question = chat_request.message.strip()
+
+    if not question:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please enter a question.",
+        )
+
+    if len(question) > 2000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The message must be 2000 characters or fewer.",
+        )
+
+    conversation = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id == conversation_id,
+            Conversation.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation session not found",
+        )
+
+    # Find the latest generated RGB image.
+    rgb_image = (
+        db.query(Image)
+        .filter(
+            Image.conversation_id == conversation_id,
+            Image.type.in_([
+                "pix2pix_rgb",
+                "wflmgan_rgb",
+                "mcgan_rgb",
+            ]),
+        )
+        .order_by(Image.created_at.desc())
+        .first()
+    )
+
+    if not rgb_image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload and process a SAR image before chatting.",
+        )
+
+    # Find the latest saved analysis.
+    analysis = (
+        db.query(Analysis)
+        .filter(Analysis.conversation_id == conversation_id)
+        .order_by(Analysis.created_at.desc())
+        .first()
+    )
+
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No analysis results found. Process the image first.",
+        )
+
+    # Build the absolute path to the generated image.
+    relative_path = rgb_image.file_path.replace(
+        "/uploads/", "", 1
+    )
+
+    image_path = os.path.abspath(
+        os.path.join(settings.UPLOAD_DIR, relative_path)
+    )
+
+    if not os.path.isfile(image_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The generated RGB image file could not be found.",
+        )
+
+    # Load recent conversation history before saving this question.
+    previous_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    history = [
+        {"role": item.role, "content": item.content}
+        for item in previous_messages[-6:]
+    ]
+
+    # Save the user's question.
+    user_message = Message(
+        conversation_id=conversation_id,
+        role="user",
+        content=question,
+    )
+
+    db.add(user_message)
+    db.commit()
+
+    # Ask the existing Florence-2 vision service.
+    try:
+        # Lazy import: don't load the vision model when the API starts.
+        from test_vlm import vlm_service
+
+        answer = vlm_service.answer(
+            question=question,
+            image_path=image_path,
+            terrain_analysis=analysis.terrain_analysis,
+            image_analysis=analysis.image_analysis,
+            conversation_history=history,
+        )
+
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        answer = f"AI error: {type(e).__name__}: {e}"
+
+    # Save and return the assistant's answer.
+    assistant_message = Message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content=answer,
+    )
+
+    conversation.updated_at = datetime.utcnow()
+
+    db.add(assistant_message)
+    db.commit()
+    db.refresh(assistant_message)
+
+    return assistant_message

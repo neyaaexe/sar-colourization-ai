@@ -2,7 +2,12 @@ import React from 'react';
 import { Download, Loader2, FileText } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { ConversationSession } from '../../types';
-
+interface ReportChatMessage {
+  id?: string;
+  role: string;
+  content: string;
+  created_at?: string;
+}
 interface ReportButtonProps {
   conversation: ConversationSession;
 }
@@ -160,7 +165,48 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
         alert('Analysis data is not available yet.');
         return;
       }
+      // Fetch saved AI Assistant questions and answers.
+let chatMessages: ReportChatMessage[] = [];
 
+try {
+  const token = localStorage.getItem('sar_token');
+
+  const response = await fetch(
+    `${API_BASE}/conversations/${conversation.id}/messages`,
+    {
+      method: 'GET',
+      headers: {
+        ...(token
+          ? { Authorization: `Bearer ${token}` }
+          : {}),
+      },
+    }
+  );
+
+  if (response.ok) {
+    const data = await response.json();
+
+    if (Array.isArray(data)) {
+      chatMessages = data.filter(
+        (message: ReportChatMessage) =>
+          message &&
+          typeof message.content === 'string' &&
+          ['user', 'assistant'].includes(message.role)
+      );
+    }
+  } else {
+    console.warn(
+      'Could not load saved chat messages:',
+      response.status,
+      await response.text()
+    );
+  }
+} catch (error) {
+  console.error(
+    'Failed to fetch saved chat messages:',
+    error
+  );
+}
       const sarImage = conversation.images?.find(
         (image) => image.type === 'original_sar'
       );
@@ -398,68 +444,72 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
         ensureSpace(90);
         y = addSectionTitle(doc, '4. LAND COVER ANALYSIS', y);
 
-        const categories = [
-          { key: 'water', label: 'Water' },
-          { key: 'vegetation', label: 'Vegetation' },
-          { key: 'bare_land', label: 'Bare land' },
-          { key: 'built_up', label: 'Built-up' },
-          { key: 'other', label: 'Other' },
-        ];
+const categories = Object.entries(landCover.percentages)
+  .filter(([, value]) => typeof value === 'number')
+  .sort((a, b) => b[1] - a[1]);
 
-        for (const category of categories) {
-          ensureSpace(12);
+if (categories.length === 0) {
+  y = addParagraph(
+    doc,
+    'No land-cover percentage values were available.',
+    18,
+    y
+  ) + 5;
+}
 
-          const percentage =
-            landCover.percentages[category.key] ?? 0;
+for (const [key, percentage] of categories) {
+  ensureSpace(12);
 
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(9);
-          doc.setTextColor(75, 91, 82);
-          doc.text(category.label, 18, y);
+  const label = key
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 
-          doc.setFont('helvetica', 'bold');
-          doc.setTextColor(18, 61, 45);
-          doc.text(`${percentage.toFixed(2)}%`, 190, y, {
-            align: 'right',
-          });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(75, 91, 82);
+  doc.text(label, 18, y);
 
-          const barX = 18;
-          const barY = y + 3;
-          const barWidth = 172;
-          const barHeight = 2;
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(18, 61, 45);
+  doc.text(`${percentage.toFixed(2)}%`, 190, y, {
+    align: 'right',
+  });
 
-          doc.setFillColor(237, 241, 237);
-          doc.roundedRect(barX, barY, barWidth, barHeight, 1, 1, 'F');
+  const barX = 18;
+  const barY = y + 3;
+  const barWidth = 172;
+  const barHeight = 2;
 
-          const colors: Record<string, [number, number, number]> = {
-            water: [57, 136, 199],
-            vegetation: [61, 155, 98],
-            bare_land: [196, 154, 87],
-            built_up: [201, 107, 99],
-            other: [146, 155, 150],
-          };
+  doc.setFillColor(237, 241, 237);
+  doc.roundedRect(
+    barX,
+    barY,
+    barWidth,
+    barHeight,
+    1,
+    1,
+    'F'
+  );
 
-          const [red, green, blue] = colors[category.key];
+  doc.setFillColor(61, 155, 98);
 
-          doc.setFillColor(red, green, blue);
+  const filledWidth =
+    barWidth * Math.min(100, Math.max(0, percentage)) / 100;
 
-          const filledWidth =
-            barWidth * Math.min(100, Math.max(0, percentage)) / 100;
+  if (filledWidth > 0) {
+    doc.roundedRect(
+      barX,
+      barY,
+      filledWidth,
+      barHeight,
+      1,
+      1,
+      'F'
+    );
+  }
 
-          if (filledWidth > 0) {
-            doc.roundedRect(
-              barX,
-              barY,
-              filledWidth,
-              barHeight,
-              1,
-              1,
-              'F'
-            );
-          }
-
-          y += 12;
-        }
+  y += 12;
+}
 
         if (landCover.model) {
           ensureSpace(12);
@@ -571,10 +621,59 @@ export const ReportButton: React.FC<ReportButtonProps> = ({
           y
         ) + 5;
       }
+      // AI ASSISTANT Q&A
+ensureSpace(35);
+y = addSectionTitle(doc, '5. AI ASSISTANT Q&A', y);
 
+if (chatMessages.length === 0) {
+  y = addParagraph(
+    doc,
+    'No saved AI Assistant questions or answers were available for this conversation.',
+    18,
+    y
+  ) + 8;
+} else {
+  for (const message of chatMessages) {
+    const isUser = message.role === 'user';
+    const label = isUser ? 'User Question' : 'AI Assistant Answer';
+
+    const contentLines = doc.splitTextToSize(
+      message.content,
+      166
+    );
+
+    const blockHeight = contentLines.length * 4.5 + 15;
+
+    ensureSpace(Math.min(blockHeight, 35));
+
+    // Recalculate the available space after a page break.
+    const actualHeight = contentLines.length * 4.5 + 15;
+    ensureSpace(actualHeight);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(
+      isUser ? 23 : 18,
+      isUser ? 99 : 61,
+      isUser ? 68 : 45
+    );
+
+    doc.text(label, 18, y);
+
+    y += 5;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    doc.setTextColor(75, 91, 82);
+
+    doc.text(contentLines, 18, y);
+
+    y += contentLines.length * 4.5 + 7;
+  }
+}
       // MODEL INFORMATION
       ensureSpace(65);
-      y = addSectionTitle(doc, '5. MODEL INFORMATION', y);
+      y = addSectionTitle(doc, '6. MODEL INFORMATION', y);
 
       const modelInfo = analysis.model_information || {};
 

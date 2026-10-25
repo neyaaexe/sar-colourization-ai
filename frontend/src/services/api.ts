@@ -42,6 +42,13 @@ export const conversationsAPI = {
     const res = await API.get(`/conversations/${id}`);
     return res.data;
   },
+  rename: async (
+  id: string,
+  title: string
+): Promise<ConversationSession> => {
+  const res = await API.patch(`/conversations/${id}`, { title });
+  return res.data;
+},
   delete: async (id: string): Promise<void> => {
     await API.delete(`/conversations/${id}`);
   },

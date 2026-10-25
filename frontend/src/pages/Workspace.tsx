@@ -11,6 +11,11 @@ import {
   Layers3,
   BarChart3,
   ChevronRight,
+  MessageCircle,
+  Send,
+  Bot,
+  User,
+  AlertCircle,
 } from 'lucide-react';
 
 import { conversationsAPI } from '../services/api';
@@ -25,6 +30,7 @@ import { ImageComparison } from '../components/analysis/ImageComparison';
 import { TerrainAnalysis } from '../components/analysis/TerrainAnalysis';
 import { ImageAnalysis } from '../components/analysis/ImageAnalysis';
 import LandCoverAnalysis from '../components/analysis/LandCoverAnalysis';
+import LandCoverInterpretation from '../components/analysis/LandCoverInterpretation';
 import { ReportButton } from '../components/analysis/ReportButton';
 import { Header } from '../components/layout/Header';
 import { Sidebar } from '../components/layout/Sidebar';
@@ -58,6 +64,18 @@ export const Workspace: React.FC = () => {
   const [isDragging, setIsDragging] = React.useState(false);
 
   const [isSidebarOpen, setIsSidebarOpen] = React.useState(true);
+
+  type ChatMessage = { id: string; role: 'user' | 'assistant'; content: string };
+  const [chatMessages, setChatMessages] = React.useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = React.useState('');
+  const [isChatSending, setIsChatSending] = React.useState(false);
+  const [chatError, setChatError] = React.useState('');
+
+  React.useEffect(() => {
+    setChatMessages([]);
+    setChatInput('');
+    setChatError('');
+  }, [currentSession?.id]);
 
   // Load workspace
   React.useEffect(() => {
@@ -122,7 +140,45 @@ export const Workspace: React.FC = () => {
       console.error('[Workspace] Failed to create scene:', error);
     }
   };
+  // Rename scene
+const handleRenameConversation = async (
+  id: string,
+  currentTitle: string
+) => {
+  const proposedTitle = window.prompt(
+    'Enter a new scene name:',
+    currentTitle
+  );
 
+  if (proposedTitle === null) return;
+
+  const title = proposedTitle.trim();
+
+  if (!title) {
+    window.alert('Scene name cannot be empty.');
+    return;
+  }
+
+  if (title.length > 120) {
+    window.alert('Scene name cannot exceed 120 characters.');
+    return;
+  }
+
+  try {
+    await conversationsAPI.rename(id, title);
+
+    const updatedList = await conversationsAPI.getAll();
+    setConversations(updatedList);
+
+    if (currentSession?.id === id) {
+      const updatedSession = await conversationsAPI.getById(id);
+      setCurrentSession(updatedSession);
+    }
+  } catch (error) {
+    console.error('[Workspace] Failed to rename scene:', error);
+    window.alert('Could not rename this scene. Please try again.');
+  }
+};
   // Delete scene
   const handleDeleteConversation = async (id: string) => {
     try {
@@ -212,6 +268,60 @@ export const Workspace: React.FC = () => {
     }
   };
 
+
+  const handleSendChatMessage = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const question = chatInput.trim();
+    if (!question || !currentSession || isChatSending) return;
+    if (!hasResults) {
+      setChatError('Upload and process a SAR image before asking questions.');
+      return;
+    }
+
+    setChatMessages((messages) => [...messages, {
+      id: `user-${Date.now()}`, role: 'user', content: question
+    }]);
+    setChatInput('');
+    setChatError('');
+    setIsChatSending(true);
+
+    try {
+      const token = localStorage.getItem('sar_token');
+      const response = await fetch(`/conversations/${currentSession.id}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ message: question }),
+      });
+      console.log("CHAT STATUS:", response.status);
+console.log("CHAT ERROR:", await response.clone().text());
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof data?.detail === 'string'
+          ? data.detail
+          : 'The assistant could not answer. Please try again.');
+      }
+
+      const answer =
+        (typeof data?.content === 'string' && data.content) ||
+        (typeof data?.answer === 'string' && data.answer) ||
+        (typeof data?.message === 'string' && data.message) ||
+        (typeof data?.message?.content === 'string' && data.message.content) ||
+        '';
+      if (!answer) throw new Error('The server returned an empty answer. Check the chat endpoint response.');
+
+      setChatMessages((messages) => [...messages, {
+        id: `assistant-${Date.now()}`, role: 'assistant', content: answer
+      }]);
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : 'Could not connect to the assistant.');
+    } finally {
+      setIsChatSending(false);
+    }
+  };
+
   // Current images
   const originalSar = currentSession?.images?.find(
     (image: ImageItem) => image.type === 'original_sar'
@@ -278,6 +388,7 @@ export const Workspace: React.FC = () => {
           activeConversationId={currentSession?.id || null}
           onSelectConversation={handleSelectConversation}
           onNewAnalysis={handleNewAnalysis}
+          onRenameConversation={handleRenameConversation}
           onDeleteConversation={handleDeleteConversation}
           isOpen={isSidebarOpen}
           onToggleOpen={() => setIsSidebarOpen((value) => !value)}
@@ -752,7 +863,8 @@ export const Workspace: React.FC = () => {
                     </div>
                   )}
                 </div>
-
+                  {/* Natural-language land-cover interpretation */}
+                <LandCoverInterpretation data={landCoverData} />
                 {/* Upload another */}
                 {processingStage === null && (
                   <div className="flex justify-center pt-2">
@@ -773,6 +885,98 @@ export const Workspace: React.FC = () => {
                 )}
               </section>
             )}
+
+            {/* SAR AI Assistant */}
+            <section className="mt-8 bg-white border border-[#D3E1D8] rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-[#E2EBE5] bg-[#F7FAF7]">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#DDF0E2] flex items-center justify-center">
+                    <Bot className="w-5 h-5 text-[#26784D]" />
+                  </div>
+                  <div>
+                    <h2 className="font-bold text-[#173D2D]">SAR AI Assistant</h2>
+                    <p className="text-xs text-[#7B9087] mt-0.5">Ask about the current image and its analysis results</p>
+                  </div>
+                </div>
+                <span className="hidden sm:inline-flex items-center gap-1.5 text-xs text-[#32815C] bg-[#E7F4EA] px-3 py-1.5 rounded-full">
+                  <MessageCircle className="w-3.5 h-3.5" /> Image Q&amp;A
+                </span>
+              </div>
+
+              <div className="p-4 sm:p-5">
+                {!hasResults && (
+                  <div className="mb-4 rounded-lg border border-[#E2EBE5] bg-[#F8FAF8] p-4 flex gap-3">
+                    <AlertCircle className="w-5 h-5 text-[#7B9087] shrink-0 mt-0.5" />
+                    <p className="text-sm text-[#71857B]">Upload and process a SAR image first. Then you can ask the assistant about the image and the available analysis.</p>
+                  </div>
+                )}
+
+                <div className="space-y-4 max-h-[420px] overflow-y-auto pr-1">
+                  {chatMessages.length === 0 && (
+                    <div className="py-7 text-center">
+                      <div className="w-12 h-12 rounded-full bg-[#EAF4EC] flex items-center justify-center mx-auto">
+                        <MessageCircle className="w-5 h-5 text-[#32815C]" />
+                      </div>
+                      <p className="text-sm font-semibold text-[#315342] mt-3">Ask a question about your analysis</p>
+                      <p className="text-xs text-[#81958C] mt-1">Try: “What terrain was predicted?” or “Explain the image statistics.”</p>
+                    </div>
+                  )}
+
+                  {chatMessages.map((message) => (
+                    <div key={message.id} className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {message.role === 'assistant' && (
+                        <div className="w-8 h-8 rounded-full bg-[#DDF0E2] flex items-center justify-center shrink-0">
+                          <Bot className="w-4 h-4 text-[#26784D]" />
+                        </div>
+                      )}
+                      <div className={`max-w-[85%] rounded-xl px-4 py-3 text-sm leading-6 whitespace-pre-wrap break-words ${
+                        message.role === 'user'
+                          ? 'bg-[#176344] text-white rounded-br-sm'
+                          : 'bg-[#F1F6F2] text-[#254637] border border-[#E1EBE3] rounded-bl-sm'
+                      }`}>{message.content}</div>
+                      {message.role === 'user' && (
+                        <div className="w-8 h-8 rounded-full bg-[#E8EEE9] flex items-center justify-center shrink-0">
+                          <User className="w-4 h-4 text-[#557064]" />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {isChatSending && (
+                    <div className="flex gap-3 items-center">
+                      <div className="w-8 h-8 rounded-full bg-[#DDF0E2] flex items-center justify-center shrink-0">
+                        <Bot className="w-4 h-4 text-[#26784D]" />
+                      </div>
+                      <div className="rounded-xl rounded-bl-sm bg-[#F1F6F2] border border-[#E1EBE3] px-4 py-3 text-sm text-[#71857B]">Thinking about your image…</div>
+                    </div>
+                  )}
+                </div>
+
+                {chatError && <p role="alert" className="mt-3 text-sm text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{chatError}</p>}
+
+                <form onSubmit={handleSendChatMessage} className="mt-5 flex items-end gap-3">
+                  <textarea
+                    value={chatInput}
+                    onChange={(event) => setChatInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        event.currentTarget.form?.requestSubmit();
+                      }
+                    }}
+                    disabled={!hasResults || isChatSending}
+                    placeholder={hasResults ? 'Ask something about this SAR image…' : 'Process an image to enable chat…'}
+                    rows={2}
+                    className="min-h-[48px] flex-1 resize-y rounded-lg border border-[#D3E1D8] bg-white px-4 py-3 text-sm text-[#173D2D] outline-none focus:border-[#32815C] focus:ring-2 focus:ring-[#32815C]/10 disabled:bg-[#F4F6F4] disabled:text-[#9AA9A1]"
+                  />
+                  <button type="submit" disabled={!hasResults || !chatInput.trim() || isChatSending} className="inline-flex h-12 items-center justify-center gap-2 rounded-lg bg-[#176344] px-4 sm:px-5 text-sm font-semibold text-white transition hover:bg-[#104D34] disabled:cursor-not-allowed disabled:opacity-50">
+                    {isChatSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    <span className="hidden sm:inline">Send</span>
+                  </button>
+                </form>
+                <p className="mt-2 text-[11px] text-[#91A198]">Enter to send · Shift+Enter for a new line</p>
+              </div>
+            </section>
           </main>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Plus,
   MessageSquare,
@@ -7,6 +7,8 @@ import {
   ChevronRight,
   Clock3,
   FolderOpen,
+  Search,
+  Pencil,
 } from 'lucide-react';
 
 import { ConversationSummary } from '../../types';
@@ -17,6 +19,7 @@ interface SidebarProps {
   onSelectConversation: (id: string) => void;
   onNewAnalysis: () => void;
   onDeleteConversation: (id: string) => void;
+  onRenameConversation: (id: string, currentTitle: string) => void;
   isOpen: boolean;
   onToggleOpen: () => void;
 }
@@ -27,9 +30,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectConversation,
   onNewAnalysis,
   onDeleteConversation,
+  onRenameConversation,
   isOpen,
   onToggleOpen,
 }) => {
+  const [searchQuery, setSearchQuery] = useState('');
+
+const filteredConversations = conversations.filter((conversation) =>
+  (conversation.title || 'SAR Analysis')
+    .toLowerCase()
+    .includes(searchQuery.trim().toLowerCase())
+);
   const groupConversations = () => {
     const today: ConversationSummary[] = [];
     const yesterday: ConversationSummary[] = [];
@@ -45,7 +56,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       startOfYesterday.getDate() - 1
     );
 
-    conversations.forEach((conversation) => {
+    filteredConversations.forEach((conversation) => {
       const date = new Date(conversation.updated_at);
 
       if (date >= startOfToday) {
@@ -192,7 +203,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           {/* Scene information */}
 
-          <div className="min-w-0 flex-1 pr-6">
+          <div className="min-w-0 flex-1 pr-16">
 
             <p
               className={`text-sm font-semibold truncate ${
@@ -253,28 +264,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           {/* Delete */}
 
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
+         {/* Rename */}
+<button
+  type="button"
+  onClick={(event) => {
+    event.stopPropagation();
+    onRenameConversation(
+      conversation.id,
+      conversation.title || 'SAR Analysis'
+    );
+  }}
+  className={`absolute right-9 top-1/2 -translate-y-1/2
+              p-1.5 rounded-md opacity-0 group-hover:opacity-100
+              transition-all ${
+                active
+                  ? 'text-[#789687] hover:text-[#176344] hover:bg-white'
+                  : 'text-[#9AB9A8] hover:text-white hover:bg-white/10'
+              }`}
+  title="Rename scene"
+  aria-label={`Rename ${conversation.title || 'SAR Analysis'}`}
+>
+  <Pencil className="w-3.5 h-3.5" />
+</button>
 
-              onDeleteConversation(
-                conversation.id
-              );
-            }}
-            className={`absolute right-2 top-1/2 -translate-y-1/2
-                        p-1.5 rounded-md
-                        opacity-0 group-hover:opacity-100
-                        transition-all
-                        ${
-                          active
-                            ? 'text-[#789687] hover:text-[#B44B40] hover:bg-white'
-                            : 'text-[#66897A] hover:text-[#E08A7F] hover:bg-white/10'
-                        }`}
-            title="Delete scene"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+{/* Delete */}
+<button
+  type="button"
+  onClick={(event) => {
+    event.stopPropagation();
+    onDeleteConversation(conversation.id);
+  }}
+  className={`absolute right-2 top-1/2 -translate-y-1/2
+              p-1.5 rounded-md opacity-0 group-hover:opacity-100
+              transition-all ${
+                active
+                  ? 'text-[#789687] hover:text-[#B44B40] hover:bg-white'
+                  : 'text-[#66897A] hover:text-[#E08A7F] hover:bg-white/10'
+              }`}
+  title="Delete scene"
+  aria-label={`Delete ${conversation.title || 'SAR Analysis'}`}
+>
+  <Trash2 className="w-3.5 h-3.5" />
+</button>
 
         </div>
 
@@ -433,11 +464,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
 
-      {/* ---------------------------------------
-          SCENES
-      --------------------------------------- */}
+{/* SCENES */}
+<div className="mt-5 px-3">
+  <div className="relative">
+    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#83A997]" />
 
-      <div className="flex-1 overflow-y-auto mt-7 px-3">
+    <input
+      type="text"
+      value={searchQuery}
+      onChange={(event) => setSearchQuery(event.target.value)}
+      placeholder="Search scenes..."
+      aria-label="Search scenes"
+      className="w-full rounded-lg border border-[#285641] bg-[#102F23] py-2.5 pl-9 pr-3 text-sm text-white placeholder:text-[#83A997] outline-none focus:border-[#65B987]"
+    />
+  </div>
+</div>
+
+<div className="flex-1 overflow-y-auto mt-4 px-3">
 
         {renderGroup('Today', today)}
 
@@ -448,7 +491,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* EMPTY */}
 
-        {conversations.length === 0 && (
+        {filteredConversations.length === 0 && (
 
           <div className="px-4 py-10 text-center">
 
@@ -459,12 +502,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
 
             <p className="text-xs text-[#769B89] mt-3">
-              No scenes yet
-            </p>
+  {searchQuery.trim() ? 'No matching scenes' : 'No scenes yet'}
+</p>
 
-            <p className="text-[10px] leading-5 text-[#527967] mt-1">
-              Create a new analysis to get started.
-            </p>
+<p className="text-[10px] leading-5 text-[#527967] mt-1">
+  {searchQuery.trim()
+    ? 'Try another scene name.'
+    : 'Create a new analysis to get started.'}
+</p>
 
           </div>
 
